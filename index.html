@@ -94,8 +94,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   #topbar .btn-sm{padding:6px 9px}
   #sidebar{width:100% !important;border-right:none}
   #content{width:100%}
-  #main:not(.detail-open) #content{display:none}   /* lista de viagens */
-  #main.detail-open #sidebar{display:none !important} /* detalhe da viagem */
+  #main.workspace:not(.detail-open) #content{display:none}   /* lista de viagens (só no workspace) */
+  #main.workspace.detail-open #sidebar{display:none !important} /* detalhe da viagem */
   .mobile-back{display:inline-flex;align-items:center}
   .detail-header{padding:12px 14px;gap:10px;align-items:center}
   .detail-emoji{display:none}         /* cabeçalho só com nome + período */
@@ -633,6 +633,7 @@ async function reloadLiveTrips(){
 }
 
 function enterWorkspace(){
+  document.getElementById('main').classList.add('workspace');
   document.getElementById('start').style.display='none';
   document.getElementById('sidebar').style.display='flex';
   document.getElementById('detail').style.display='block';
@@ -651,7 +652,7 @@ function enterWorkspace(){
 
 function exitWorkspace(){
   state.mode=null; state.trips=[]; state.currentId=null;
-  document.getElementById('main').classList.remove('detail-open');
+  document.getElementById('main').classList.remove('detail-open','workspace');
   document.getElementById('start').style.display='flex';
   document.getElementById('sidebar').style.display='none';
   document.getElementById('detail').style.display='none';

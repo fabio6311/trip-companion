@@ -165,6 +165,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .stat-num{font-size:24px;font-weight:700}
 .stat-label{font-size:12px;color:var(--text3);margin-top:2px}
 
+.dest-btn{display:inline-flex;flex-direction:column;align-items:center;gap:3px;min-width:96px;
+  background:var(--card);border:1px solid var(--border);border-radius:14px;padding:12px;cursor:pointer;
+  box-shadow:0 1px 3px rgba(0,0,0,.06);transition:transform .1s,box-shadow .12s,border-color .12s;font-family:inherit}
+.dest-btn:hover{border-color:var(--blue);box-shadow:0 3px 12px rgba(0,0,0,.10)}
+.dest-btn:active{transform:scale(.96)}
+.dest-btn .fl{font-size:30px;line-height:1}
+.dest-btn .ci{font-size:13px;font-weight:600;color:var(--text)}
+.dest-btn .ni{font-size:11px;color:var(--text3)}
+.trip-actions{display:flex;gap:2px;flex-shrink:0}
+
 .empty{text-align:center;padding:40px 20px;color:var(--text3)}
 .empty-icon{font-size:40px;margin-bottom:12px}
 .empty p{font-size:14px;line-height:1.5}
@@ -847,6 +857,10 @@ function renderTripList(){
       <div class="trip-info">
         <div class="trip-name">${esc(t.name)}</div>
         <div class="trip-sub">${t.originFlagEmoji} ${esc(t.originCity||'—')} · ${dates}</div>
+      </div>
+      <div class="trip-actions" onclick="event.stopPropagation()">
+        <button class="icon-btn" onclick="openEditTrip('${t.id}')" title="Editar viagem">✏️</button>
+        <button class="icon-btn" onclick="confirmDeleteTrip('${t.id}')" title="Excluir viagem">🗑</button>
       </div></div>`;
   }).join('');
 }
@@ -894,6 +908,12 @@ function switchTab(i){ state.tab=i;
   const sel=document.querySelector('.tab-select'); if(sel && +sel.value!==i) sel.value=i;
   const c=document.getElementById('content'); if(c) c.scrollTop=0;
   renderTab(); }
+// Abre o Diário e rola até o dia informado (ex.: 1º dia de um destino)
+function goToDiaryDay(day){
+  switchTab(2);
+  setTimeout(()=>{ const el=document.getElementById('dd-'+day);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); },70);
+}
 
 function renderTab(){
   const el=document.getElementById('tab-body');
@@ -918,46 +938,34 @@ function renderGeral(){
   const t=findTrip(state.currentId);
   const totalNights=t.destinations.reduce((s,d)=>s+d.numberOfNights,0);
   const totalRes=t.destinations.reduce((s,d)=>s+d.reservations.length,0);
-  const doneReqs=t.requirements.filter(r=>r.isDone).length;
-  let chain='';
-  if(t.destinations.length){
-    chain=`<div class="dest-chain">`;
-    t.destinations.forEach((d,i)=>{ chain+=`<div class="chain-dest"><div class="chain-flag">${d.flagEmoji}</div>
-      <div class="chain-city">${esc(d.city)}</div><div class="chain-nights">${d.numberOfNights}n</div></div>`;
-      if(i<t.destinations.length-1) chain+=`<div class="chain-arrow">→</div>`; });
-    chain+=`</div>`;
-  }
+  // Botões de destino (bandeira) → abrem o Diário no 1º dia daquele destino
+  const destBtns = t.destinations.length?`<div class="section" style="margin-top:22px">
+    <div class="section-title" style="margin-bottom:12px">Destinos <span style="text-transform:none;font-weight:400;color:var(--text3)">· toque para ver no diário</span></div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center">
+      ${t.destinations.map(d=>`<button class="dest-btn" onclick="goToDiaryDay('${d.arrivalDate}')" title="Ver ${esc(d.city)} no diário">
+        <span class="fl">${d.flagEmoji}</span>
+        <span class="ci">${esc(d.city)}</span>
+        <span class="ni">${d.numberOfNights} noite${d.numberOfNights===1?'':'s'}</span></button>`).join('')}
+    </div></div>`:'';
   // Países visitados (únicos, na ordem do roteiro)
   const countries=[];
   t.destinations.forEach(d=>{ if(d.country && !countries.find(c=>c.country===d.country)) countries.push({country:d.country,flag:d.flagEmoji}); });
-  const countriesBlock = countries.length?`<div class="section" style="margin-top:20px">
-    <div class="section-title" style="margin-bottom:8px">Países visitados (${countries.length})</div>
-    <div class="card"><div class="row" style="flex-wrap:wrap;gap:16px">
-      ${countries.map(c=>`<div style="display:flex;align-items:center;gap:7px">
-        <span style="font-size:26px">${c.flag}</span><span style="font-size:14px;font-weight:500">${esc(c.country)}</span></div>`).join('')}
-    </div></div></div>`:'';
-  return `<div class="tab-content">
+  const countriesBlock = countries.length?`<div class="section" style="margin-top:26px">
+    <div class="section-title" style="margin-bottom:12px">Países visitados (${countries.length})</div>
+    <div style="display:flex;flex-wrap:wrap;gap:14px 24px;justify-content:center">
+      ${countries.map(c=>`<div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:30px">${c.flag}</span><span style="font-size:15px;font-weight:500">${esc(c.country)}</span></div>`).join('')}
+    </div></div>`:'';
+  return `<div class="tab-content" style="text-align:center">
     <div class="stat-grid">
       <div class="stat-card"><div class="stat-num">${t.totalDays}</div><div class="stat-label">Dias</div></div>
       <div class="stat-card"><div class="stat-num">${totalNights}</div><div class="stat-label">Noites</div></div>
       <div class="stat-card"><div class="stat-num">${totalRes}</div><div class="stat-label">Reservas</div></div>
     </div>
-    ${chain}
+    ${destBtns}
     ${countriesBlock}
-    ${t.notes?`<div class="section" style="margin-top:20px"><div class="section-title" style="margin-bottom:8px">Observações</div>
-      <div class="card"><div class="row"><div class="row-body">${esc(t.notes)}</div></div></div></div>`:''}
-    ${t.requirements.length?`<div class="section" style="margin-top:20px">
-      <div class="section-title" style="margin-bottom:8px">Requisitos (${doneReqs}/${t.requirements.length})</div>
-      <div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden">
-        <div style="background:var(--green);height:100%;width:${Math.round(doneReqs/t.requirements.length*100)}%"></div>
-      </div></div>`:''}
-    <div class="section" style="margin-top:26px">
-      <div class="section-title" style="margin-bottom:8px">Viagem</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-ghost btn-sm" onclick="openEditTrip()">✏️ Editar viagem</button>
-        <button class="btn btn-danger btn-sm" onclick="confirmDeleteTrip()">🗑 Excluir viagem</button>
-      </div>
-    </div>
+    ${t.notes?`<div class="section" style="margin-top:26px"><div class="section-title" style="margin-bottom:8px">Observações da viagem</div>
+      <div class="card" style="text-align:left"><div class="row"><div class="row-body">${esc(t.notes)}</div></div></div></div>`:''}
   </div>`;
 }
 
@@ -1136,7 +1144,7 @@ function renderDiario(){
       <button class="btn btn-soft btn-sm" onclick="printDiary()">🖨️ Imprimir / PDF</button>
     </div>`;
   model.forEach(D=>{
-    html+=`<div class="card" style="margin-bottom:12px">
+    html+=`<div class="card" id="dd-${D.day}" style="margin-bottom:12px;scroll-margin-top:8px">
       <div style="padding:10px 16px;background:linear-gradient(135deg,rgba(0,122,255,.06),rgba(0,122,255,.02));border-bottom:1px solid var(--border)">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <span class="badge badge-blue">Dia ${D.idx+1}</span>
@@ -1695,7 +1703,7 @@ function openCreateTrip(){
       originCity:val(ov,'t-city'),originCountry:val(ov,'t-country'),originCountryCode:val(ov,'t-cc').toUpperCase(),notes:val(ov,'t-notes')});
       renderTripList(); selectTrip(id); toast('Viagem criada! ✈️'); });
 }
-function openEditTrip(){ const t=findTrip(state.currentId);
+function openEditTrip(id){ const t=findTrip(id||state.currentId); if(!t) return;
   modal('Editar Viagem',`${field('t-name','Nome','text',t.name)}${field('t-emoji','Emoji','text',t.coverEmoji)}
     <div class="field-row">${field('t-city','Cidade de origem','text',t.originCity)}${field('t-country','País','text',t.originCountry)}</div>
     ${field('t-cc','Código do país (ex: BR)','text',t.originCountryCode,'maxlength="2" style="text-transform:uppercase"')}
@@ -1704,11 +1712,15 @@ function openEditTrip(){ const t=findTrip(state.currentId);
       originCountry:val(ov,'t-country'),originCountryCode:val(ov,'t-cc').toUpperCase(),notes:val(ov,'t-notes')});
       renderTripList(); renderDetail(); toast('Viagem atualizada!'); });
 }
-async function confirmDeleteTrip(){ const t=findTrip(state.currentId);
+async function confirmDeleteTrip(id){ const t=findTrip(id||state.currentId); if(!t) return;
   if(!confirm(`Excluir "${t.name}"? Todos os dados serão perdidos.`)) return;
+  const wasCurrent=(t.id===state.currentId);
   await actDeleteTrip(t.id);
-  if(state.trips.length){ selectTrip(state.trips[0].id); } else { state.currentId=null;
-    document.getElementById('detail').innerHTML=`<div class="empty" style="margin-top:80px"><div class="empty-icon">✈️</div><p>Nenhuma viagem.</p></div>`; }
+  if(wasCurrent){
+    if(state.trips.length){ selectTrip(state.trips[0].id); }
+    else { state.currentId=null; document.getElementById('main').classList.remove('detail-open');
+      document.getElementById('detail').innerHTML=`<div class="empty" style="margin-top:80px"><div class="empty-icon">✈️</div><p>Nenhuma viagem.</p></div>`; }
+  }
   renderTripList(); toast('Viagem excluída');
 }
 

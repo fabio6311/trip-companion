@@ -985,14 +985,23 @@ function renderDetail(){
   renderTab();
 }
 
-function switchTab(i){ state.tab=i;
+function switchTab(i,keepScroll){ state.tab=i;
   document.querySelectorAll('.tab').forEach((t,idx)=>t.classList.toggle('active',idx===i));
   const sel=document.querySelector('.tab-select'); if(sel && +sel.value!==i) sel.value=i;
   const c=document.getElementById('content'); if(c) c.scrollTop=0;
-  renderTab(); }
+  renderTab();
+  if(!keepScroll) autoScrollToday(i); }
+// Se estiver DENTRO do período da viagem, ao abrir Diário/Reservas já rola até hoje
+function autoScrollToday(i){
+  const t=findTrip(state.currentId); if(!t) return;
+  const today=new Date().toISOString().slice(0,10);
+  if(!(t.startDate && t.endDate && today>=t.startDate && today<=t.endDate)) return;
+  if(i===2){ setTimeout(()=>{ const el=document.getElementById('dd-'+today); if(el) el.scrollIntoView({block:'start'}); },50); }
+  else if(i===4){ const dd=destForDate(t,today); if(dd) setTimeout(()=>{ const el=document.getElementById('res-'+dd.id); if(el) el.scrollIntoView({block:'start'}); },50); }
+}
 // Abre o Diário e rola até o dia informado (ex.: 1º dia de um destino)
 function goToDiaryDay(day){
-  switchTab(2);
+  switchTab(2,true);
   setTimeout(()=>{ const el=document.getElementById('dd-'+day);
     if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); },70);
 }
@@ -1089,7 +1098,7 @@ function renderReservas(){
       <div style="font-size:12px;color:var(--text3);margin-top:6px">Envie o comprovante (hotel, passeio, transfer…) e ele é alocado automaticamente na cidade certa, pela data.</div>
     </div>`;
   t.destinations.forEach(d=>{
-    html+=`<div class="section"><div class="section-header"><span class="section-title">${d.flagEmoji} ${esc(d.city)}</span>
+    html+=`<div class="section" id="res-${d.id}" style="scroll-margin-top:8px"><div class="section-header"><span class="section-title">${d.flagEmoji} ${esc(d.city)}</span>
       <div style="display:flex;gap:6px">
         <button class="btn btn-primary btn-sm" onclick="openAddRes('${d.id}')">+ Reserva</button>
       </div></div>`;
@@ -1535,6 +1544,8 @@ async function importReceipt(){
   });
 }
 function resBRL(r){ return (+r.amountBRL>0)?+r.amountBRL:(+r.priceTotal||0); } // valor em R$ (convertido) ou fallback
+let _spendScale='sqrt'; // 'sqrt' (comprimida) | 'linear' (proporcional)
+function toggleSpendScale(){ _spendScale=(_spendScale==='sqrt'?'linear':'sqrt'); renderTab(); }
 function renderCustos(){
   const t=findTrip(state.currentId);
   const cats={'Transportes':0,'Acomodações':0,'Refeições':0,'Passeios':0,'Compras':0};
@@ -1556,22 +1567,33 @@ function renderCustos(){
       <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:6px">
       <div style="height:100%;background:${color};width:${pct}%"></div></div></div>`; }});
   html+=`</div></div>`;
-  // Gráfico de gastos por dia
+  // Gráfico de gastos por dia — empilhado por categoria, com escala comprimida (√) opcional
   if(total>0){
-    const perDay={};
-    t.destinations.forEach(d=>d.reservations.forEach(r=>{ if(resBRL(r)>0) perDay[r.date]=(perDay[r.date]||0)+resBRL(r); }));
-    (t.expenses||[]).forEach(e=>{ if(+e.amountBRL>0) perDay[e.date]=(perDay[e.date]||0)+(+e.amountBRL); });
-    const days=(t.startDate&&t.endDate)?dateRange(t.startDate,t.endDate):Object.keys(perDay).sort();
-    const maxV=Math.max(1,...days.map(dd=>perDay[dd]||0));
-    html+=`<div class="section"><div class="section-title" style="margin-bottom:12px">Gastos por dia</div>
-      <div class="card" style="padding:14px 12px">
-        <div style="display:flex;align-items:flex-end;gap:3px;height:120px">
-          ${days.map(dd=>{ const v=perDay[dd]||0; const h=Math.max(v>0?6:2,Math.round(v/maxV*100));
-            return `<div title="${fmt(dd)}: ${fmt$(v)}" style="flex:1;min-width:7px;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
-              <div style="width:100%;background:${v>0?'var(--blue)':'var(--border)'};height:${h}%;border-radius:3px 3px 0 0"></div>
+    const CATS=['Transportes','Acomodações','Refeições','Passeios','Compras'];
+    const perDayCat={};
+    const add=(day,cat,v)=>{ if(!(v>0)) return; (perDayCat[day]=perDayCat[day]||{}); perDayCat[day][cat]=(perDayCat[day][cat]||0)+v; };
+    t.destinations.forEach(d=>d.reservations.forEach(r=>add(r.date, r.expenseCategory||guessExpenseCat(r.type), resBRL(r))));
+    (t.expenses||[]).forEach(e=>add(e.date, e.category||'Compras', +e.amountBRL||0));
+    const days=(t.startDate&&t.endDate)?dateRange(t.startDate,t.endDate):Object.keys(perDayCat).sort();
+    const totFor=dd=>CATS.reduce((s,c)=>s+((perDayCat[dd]||{})[c]||0),0);
+    const maxV=Math.max(1,...days.map(totFor));
+    const comp=(_spendScale==='sqrt');
+    const scale=v=>comp?Math.sqrt(v)/Math.sqrt(maxV):v/maxV;   // altura da barra (0..1)
+    const legend=CATS.filter(c=>cats[c]>0).map(c=>`<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:2px;background:${EXP_HEX[c]}"></span>${c}</span>`).join('');
+    html+=`<div class="section"><div class="section-header" style="margin-bottom:10px">
+        <span class="section-title">Gastos por dia</span>
+        <button class="btn btn-soft btn-sm" onclick="toggleSpendScale()">${comp?'Escala: comprimida':'Escala: proporcional'}</button></div>
+      <div class="card" style="padding:14px 10px">
+        <div style="display:flex;align-items:flex-end;gap:3px;height:130px">
+          ${days.map(dd=>{ const tot=totFor(dd); const barH=tot>0?Math.max(6,Math.round(scale(tot)*100)):2;
+            const day=perDayCat[dd]||{};
+            const segs=CATS.filter(c=>day[c]>0).map(c=>`<div style="height:${Math.max(3,Math.round(day[c]/tot*100))}%;background:${EXP_HEX[c]}"></div>`).join('');
+            return `<div onclick="toast('${fmt(dd)}: ${fmt$(tot)}',3000)" title="${fmt(dd)}: ${fmt$(tot)}" style="flex:1;min-width:7px;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;cursor:pointer">
+              <div style="width:100%;height:${barH}%;display:flex;flex-direction:column-reverse;border-radius:3px 3px 0 0;overflow:hidden;background:${tot>0?'transparent':'var(--border)'}">${segs}</div>
               <div style="font-size:9px;color:var(--text3);margin-top:4px">${dd.slice(8,10)}</div></div>`; }).join('')}
         </div>
-        <div style="font-size:11px;color:var(--text3);text-align:center;margin-top:8px">Passe o mouse sobre um dia para ver o valor</div>
+        ${legend?`<div style="display:flex;flex-wrap:wrap;gap:6px 14px;justify-content:center;margin-top:12px;font-size:11px;color:var(--text2)">${legend}</div>`:''}
+        <div style="font-size:11px;color:var(--text3);text-align:center;margin-top:8px">${comp?'Escala comprimida (√) — dias menores ficam visíveis apesar da passagem. ':''}Toque num dia para ver o total.</div>
       </div></div>`;
   }
   t.destinations.forEach(d=>{ const dr=d.reservations.filter(r=>+r.priceTotal>0);

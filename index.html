@@ -1423,7 +1423,7 @@ function renderRequisitos(){
 
 // ── Custos ───────────────────────────────────────────────────────────────────
 const EXP_ICONS={'Transportes':'🚗','Acomodações':'🏨','Refeições':'🍽️','Passeios':'📸','Compras':'🛍️'};
-const EXP_HEX={'Transportes':'#5856D6','Acomodações':'#007AFF','Refeições':'#FF3B30','Passeios':'#34C759','Compras':'#FF9500'};
+const EXP_HEX={'Transportes':'#007AFF','Acomodações':'#FFCC00','Refeições':'#8E8E93','Passeios':'#34C759','Compras':'#FF9500'};
 function guessExpenseCat(type){const l=(type||'').toLowerCase();
   if(l.includes('voo')||l.includes('carro')||l.includes('trem')||l.includes('transfer'))return 'Transportes';
   if(l.includes('hotel'))return 'Acomodações'; if(l.includes('restaurante'))return 'Refeições';

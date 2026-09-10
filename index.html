@@ -385,7 +385,7 @@ async function doAirImport(mode){
     try{
       const b64=await fileToBase64(file);
       const mt=((file.type||'').includes('pdf')||/\.pdf$/i.test(file.name))?'application/pdf':(file.type||'image/jpeg');
-      const ticketVoucher=await fileToVoucher(file); // guarda o bilhete no voo de ida
+      const ticketVoucher=await stashVoucher(await fileToVoucher(file)); // guarda o bilhete (IndexedDB) no voo de ida
       const data=parseAIJSON(await callClaude(AIR_PROMPT,b64,mt));
       const t=findTrip(state.currentId); const segs=data.segments||[];
       if(!segs.length) throw new Error('Nenhum trecho encontrado no arquivo');
@@ -485,6 +485,20 @@ async function doAirImport(mode){
     }catch(e){ toast('Erro ao importar passagem: '+e.message,5000); }
   });
 }
+// Descobre em qual cidade o viajante estará numa data (para alocar a reserva automaticamente)
+function destForDate(t,date){
+  const ds=(t.destinations||[]); if(!ds.length) return null;
+  if(date){
+    // dentro do período de algum destino; em dia sobreposto (check-out=check-in), vence quem chegou por último
+    const hits=ds.filter(d=>d.arrivalDate&&d.departureDate&&date>=d.arrivalDate&&date<=d.departureDate);
+    if(hits.length){ hits.sort((a,b)=>a.arrivalDate<b.arrivalDate?1:-1); return hits[0]; }
+    let best=null,bd=Infinity;
+    ds.forEach(d=>{ const ref=d.arrivalDate||d.departureDate; if(!ref) return;
+      const diff=Math.abs(new Date(date+'T00:00:00')-new Date(ref+'T00:00:00')); if(diff<bd){bd=diff;best=d;} });
+    if(best) return best;
+  }
+  return ds[0];
+}
 async function importVoucher(destId){
   if(!getClaudeKey()){ openKeyModal(()=>importVoucher(destId)); return; }
   pickFile('application/pdf,image/*', async file=>{
@@ -492,7 +506,7 @@ async function importVoucher(destId){
     try{
       const b64=await fileToBase64(file);
       const mt=((file.type||'').includes('pdf')||/\.pdf$/i.test(file.name))?'application/pdf':(file.type||'image/jpeg');
-      const voucher=await fileToVoucher(file); // guarda o próprio arquivo do voucher
+      const voucher=await stashVoucher(await fileToVoucher(file)); // guarda o arquivo do voucher (IndexedDB)
       const d=parseAIJSON(await callClaude(VOUCHER_PROMPT,b64,mt));
       const tm={hotel:'Hotel',flight:'Voo',carRental:'Aluguel de Carro',transfer:'Transfer',tour:'Passeio / Tour',restaurant:'Restaurante',train:'Trem',other:'Outro'};
       const pay=['Pago','Pagar no local','Pendente'].includes(d.paymentStatus)?d.paymentStatus:'Pendente';
@@ -504,11 +518,17 @@ async function importVoucher(destId){
       const resTitle=d.title||d.providerName||'Reserva';
       const resPrice=+d.totalPrice||0; const resCur=(d.currency||'BRL').toUpperCase();
       let resBRLval=resPrice; if(resCur!=='BRL' && resPrice>0){ const rt=await rateToBRL(resCur,resDate); resBRLval=rt?resPrice*rt:0; } // converte p/ R$
+      // Aloca automaticamente na cidade do dia quando não veio uma cidade fixa
+      let targetId=destId;
+      if(!targetId){ const dd=destForDate(t,resDate);
+        if(!dd){ toast('Adicione destinos antes de importar reservas.',5000); return; }
+        targetId=dd.id; }
       // Proteção anti-duplicação: reserva parecida (mesmo tipo, data e título) já existe nesta cidade?
-      const dest=(t.destinations||[]).find(x=>x.id===destId);
+      const dest=(t.destinations||[]).find(x=>x.id===targetId);
+      const cityName=dest?dest.city:'';
       const similar=dest && (dest.reservations||[]).some(r=>r.type===resType && r.date===resDate && norm(r.title)===norm(resTitle));
-      if(similar && !confirm('Já existe uma reserva parecida ("'+resTitle+'") em '+fmt(resDate)+' nesta cidade.\nAdicionar mesmo assim?')){ toast('Cancelado — reserva não duplicada.'); return; }
-      await actAddReservation(destId,{type:resType,title:resTitle,
+      if(similar && !confirm('Já existe uma reserva parecida ("'+resTitle+'") em '+fmt(resDate)+' ('+cityName+').\nAdicionar mesmo assim?')){ toast('Cancelado — reserva não duplicada.'); return; }
+      await actAddReservation(targetId,{type:resType,title:resTitle,
         providerName:d.providerName||'',confirmationNumber:d.confirmationNumber||'',
         date:resDate,
         startDateTime:combineISO(ci,d.checkInTime),
@@ -519,8 +539,8 @@ async function importVoucher(destId){
       renderDetail();
       // Avisa se a data ficou fora do período da viagem (não apareceria no diário)
       if(t.startDate && t.endDate && (resDate<t.startDate || resDate>t.endDate))
-        toast('⚠️ Importado, mas a data ('+fmt(resDate)+') está FORA do período da viagem — edite a data para aparecer no diário.',6500);
-      else toast('Voucher importado em '+fmt(resDate)+' 🗂️');
+        toast('⚠️ Importado em '+(cityName||'?')+', mas a data ('+fmt(resDate)+') está FORA do período — ajuste a data/cidade na reserva.',7000);
+      else toast('Voucher → '+(cityName||'')+' · '+fmt(resDate)+' 🗂️',4000);
     }catch(e){ toast('Erro ao importar voucher: '+e.message,5000); }
   });
 }
@@ -568,7 +588,15 @@ function catColor(c){const m={'Visto':'indigo','Vacina':'green','Habilitação I
 // ── Persistence (offline) ────────────────────────────────────────────────────
 function persist(){ if(state.mode!=='offline') return true;
   try{ localStorage.setItem(STORE_KEY, JSON.stringify(state.trips)); return true; }
-  catch(e){ toast('⚠️ Armazenamento cheio — imagem grande não coube. Dados sem a imagem foram mantidos.',4500); return false; } }
+  catch(e){ toast('⚠️ Armazenamento quase cheio. Um item pode não ter sido salvo — exporte um backup por segurança.',5000); return false; } }
+// ── Arquivos grandes (PDF/imagem) no IndexedDB (armazenamento amplo do navegador) ──
+const IDB_DB='tp_files', IDB_ST='blobs';
+function _idb(){ return new Promise((res,rej)=>{ const rq=indexedDB.open(IDB_DB,1);
+  rq.onupgradeneeded=()=>{ if(!rq.result.objectStoreNames.contains(IDB_ST)) rq.result.createObjectStore(IDB_ST); };
+  rq.onsuccess=()=>res(rq.result); rq.onerror=()=>rej(rq.error); }); }
+async function blobPut(key,val){ const db=await _idb(); return new Promise((res,rej)=>{ const tx=db.transaction(IDB_ST,'readwrite'); tx.objectStore(IDB_ST).put(val,key); tx.oncomplete=()=>res(key); tx.onerror=()=>rej(tx.error); }); }
+async function blobGet(key){ try{ const db=await _idb(); return await new Promise(res=>{ const tx=db.transaction(IDB_ST,'readonly'); const rq=tx.objectStore(IDB_ST).get(key); rq.onsuccess=()=>res(rq.result||null); rq.onerror=()=>res(null); }); }catch(e){ return null; } }
+async function blobDel(key){ try{ const db=await _idb(); await new Promise(res=>{ const tx=db.transaction(IDB_ST,'readwrite'); tx.objectStore(IDB_ST).delete(key); tx.oncomplete=()=>res(); tx.onerror=()=>res(); }); }catch(e){} }
 // Redimensiona imagem (evita estourar o localStorage). Só imagens; PDFs ficam só com os dados.
 function downscaleImage(file,maxPx,quality){ maxPx=maxPx||1000; quality=quality||0.72;
   return new Promise((res,rej)=>{
@@ -593,21 +621,35 @@ function fileToVoucher(file){ return new Promise(async res=>{
   if(isPdf){ const r=new FileReader(); r.onload=()=>res({kind:'pdf',name:file.name||'voucher.pdf',data:String(r.result)}); r.onerror=()=>res(null); r.readAsDataURL(file); }
   else { const img=await downscaleImage(file); res(img?{kind:'image',name:file.name||'voucher.jpg',data:img}:null); }
 }); }
-function openVoucher(v){ if(!v||!v.data) return;
-  if(v.kind==='image'){ openImage(v.data); return; }
-  try{ const parts=v.data.split(','); const bin=atob(parts[1]); const arr=new Uint8Array(bin.length);
-    for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
-    const url=URL.createObjectURL(new Blob([arr],{type:'application/pdf'}));
-    window.open(url,'_blank'); setTimeout(()=>URL.revokeObjectURL(url),60000);
-  }catch(e){ window.open(v.data,'_blank'); } }
+// Guarda o arquivo do voucher no IndexedDB e devolve só a referência {kind,name,ref}
+async function stashVoucher(v){
+  if(!v) return null;
+  if(v.ref) return v;                 // já é referência
+  if(v.data){ const key='v_'+uid(); try{ await blobPut(key,v.data); return {kind:v.kind,name:v.name,ref:key}; }
+    catch(e){ return v; } }           // se falhar, mantém inline (raro)
+  return v;
+}
+function pdfDataToUrl(data){ const parts=String(data).split(','); const bin=atob(parts[1]); const arr=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i); return URL.createObjectURL(new Blob([arr],{type:'application/pdf'})); }
+async function openVoucher(v){
+  if(!v) return;
+  const isPdf=(v.kind==='pdf');
+  // PDF: abre a aba ANTES do await (evita bloqueio de pop-up), depois define o conteúdo
+  let win=null; if(isPdf) win=window.open('','_blank');
+  let data=v.data; if(!data && v.ref) data=await blobGet(v.ref);
+  if(!data){ if(win) win.close(); toast('Arquivo do voucher não encontrado.',3500); return; }
+  if(isPdf){ try{ const url=pdfDataToUrl(data); if(win) win.location=url; else window.open(url,'_blank'); setTimeout(()=>URL.revokeObjectURL(url),60000); }
+    catch(e){ if(win) win.location=data; } }
+  else openImage(data);
+}
 function viewResVoucher(resId){ const {r}=findRes(resId); if(r&&r.voucher) openVoucher(r.voucher); }
 function attachResVoucher(destId,resId){ pickFile('application/pdf,image/*', async file=>{
   const v=await fileToVoucher(file);
   if(!v){ toast('Não consegui ler esse arquivo.',3500); return; }
   const {r}=findRes(resId); if(!r) return;
-  r.voucher=v; const ok=persist();
+  r.voucher=await stashVoucher(v); persist();
   renderDetail();
-  toast(ok?'Voucher anexado à reserva 📎':'⚠️ Anexado, mas o arquivo é grande e pode não caber ao recarregar.',ok?2200:5000);
+  toast('Voucher anexado à reserva 📎');
 }); }
 function loadOffline(){ try{ return JSON.parse(localStorage.getItem(STORE_KEY)||'[]'); }catch(e){ return []; } }
 
@@ -621,11 +663,23 @@ function showConnect(){ const b=document.getElementById('connect-box'); b.style.
   const saved=localStorage.getItem('tp_url'); if(saved) document.getElementById('url-input').value=saved;
 }
 
-function startOffline(){
+async function startOffline(){
   state.mode='offline'; state.base='';
   state.trips=loadOffline().map(decorate);
   enterWorkspace();
   toast('Modo offline 💻');
+  const moved=await migrateVouchers(state.trips);   // move vouchers antigos p/ o IndexedDB
+  if(moved){ persist(); if(state.currentId) renderDetail(); toast('Otimizado: '+moved+' arquivo(s) movido(s) p/ armazenamento amplo 🗄️',4000); }
+}
+async function migrateVouchers(trips){
+  let moved=0;
+  for(const t of trips||[]) for(const d of (t.destinations||[])) for(const r of (d.reservations||[])){
+    if(r.voucher && r.voucher.data && !r.voucher.ref){
+      const nv=await stashVoucher(r.voucher);
+      if(nv && nv.ref){ r.voucher=nv; moved++; }
+    }
+  }
+  return moved;
 }
 
 async function startLive(){
@@ -759,6 +813,23 @@ async function actDeleteReservation(id){
   else { const {d,r}=findRes(id); d.reservations=d.reservations.filter(x=>x.id!==r.id); }
   await refreshTrip(state.currentId);
 }
+// Move uma reserva para outra cidade (correção da alocação automática)
+async function actMoveReservation(id,newDestId){
+  const {d,r}=findRes(id); if(!d||!r||d.id===newDestId) return;
+  if(state.mode==='live'){
+    const p={type:r.type,title:r.title,date:r.date,startDateTime:r.startDateTime,endDateTime:r.endDateTime,
+      confirmationNumber:r.confirmationNumber,providerName:r.providerName,address:r.address,phone:r.phone,website:r.website,
+      priceTotal:r.priceTotal,currency:r.currency,amountBRL:r.amountBRL,notes:r.notes,isConfirmed:r.isConfirmed,
+      paymentStatus:r.paymentStatus,rating:r.rating,breakfast:r.breakfast,refundable:r.refundable,roomType:r.roomType,
+      roomSize:r.roomSize,roomView:r.roomView,amenities:r.amenities,roomPhoto:r.roomPhoto,expenseCategory:r.expenseCategory};
+    await api('DELETE','/api/reservations/'+id);
+    await api('POST','/api/destinations/'+newDestId+'/reservations',p);
+  } else {
+    d.reservations=d.reservations.filter(x=>x.id!==r.id);
+    const nd=findDest(newDestId).d; if(nd){ nd.reservations=nd.reservations||[]; nd.reservations.push(r); }
+  }
+  await refreshTrip(state.currentId);
+}
 async function actUpdateExpense(id,cat){
   if(state.mode==='live'){ await api('PUT','/api/reservations/'+id+'/expense',{expenseCategory:cat}); }
   else { const {r}=findRes(id); r.expenseCategory=cat; }
@@ -787,9 +858,16 @@ async function actDeleteRequirement(id){
 // ═══════════════════════════════════════════════════════════════════════════
 // Export / Import file
 // ═══════════════════════════════════════════════════════════════════════════
-function exportFile(){
+async function exportFile(){
   if(!state.trips.length){ toast('Nenhuma viagem para exportar'); return; }
-  const payload={ format:'tripplanner-export', version:1, exportedAt:new Date().toISOString(), trips:state.trips };
+  toast('Preparando arquivo…',4000);
+  // Clona e "embute" os vouchers (IndexedDB → data) para o arquivo ser portátil (iPhone, backup)
+  const clone=JSON.parse(JSON.stringify(state.trips));
+  for(const t of clone) for(const d of (t.destinations||[])) for(const r of (d.reservations||[])){
+    if(r.voucher && r.voucher.ref && !r.voucher.data){ const data=await blobGet(r.voucher.ref);
+      if(data) r.voucher={kind:r.voucher.kind,name:r.voucher.name,data}; }
+  }
+  const payload={ format:'tripplanner-export', version:1, exportedAt:new Date().toISOString(), trips:clone };
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
@@ -816,6 +894,10 @@ document.getElementById('file-input').addEventListener('change', async e=>{
       for(const t of incoming){ await pushTripToLive(t); }
       await reloadLiveTrips();
     } else {
+      // Move os vouchers embutidos do arquivo para o IndexedDB (mantém o localStorage leve)
+      for(const t of incoming) for(const d of (t.destinations||[])) for(const r of (d.reservations||[])){
+        if(r.voucher && r.voucher.data && !r.voucher.ref){ const nv=await stashVoucher(r.voucher); if(nv) r.voucher=nv; }
+      }
       state.trips=state.trips.concat(incoming); persist();
     }
     enterWorkspace();
@@ -1001,11 +1083,14 @@ const RES_COLORS={'Hotel':'badge-blue','Voo':'badge-blue','Aluguel de Carro':'ba
 function renderReservas(){
   const t=findTrip(state.currentId);
   if(!t.destinations.length) return `<div class="tab-content"><div class="empty"><div class="empty-icon">🗂️</div><p>Adicione destinos primeiro.</p></div></div>`;
-  let html=`<div class="tab-content">`;
+  let html=`<div class="tab-content">
+    <div style="text-align:center;margin-bottom:18px">
+      <button class="btn btn-primary" style="padding:11px 18px" onclick="importVoucher()">✨ Enviar voucher (IA)</button>
+      <div style="font-size:12px;color:var(--text3);margin-top:6px">Envie o comprovante (hotel, passeio, transfer…) e ele é alocado automaticamente na cidade certa, pela data.</div>
+    </div>`;
   t.destinations.forEach(d=>{
     html+=`<div class="section"><div class="section-header"><span class="section-title">${d.flagEmoji} ${esc(d.city)}</span>
       <div style="display:flex;gap:6px">
-        <button class="btn btn-soft btn-sm" onclick="importVoucher('${d.id}')">✨ Voucher (IA)</button>
         <button class="btn btn-primary btn-sm" onclick="openAddRes('${d.id}')">+ Reserva</button>
       </div></div>`;
     if(!d.reservations.length) html+=`<div class="empty" style="padding:20px"><p>Nenhuma reserva em ${esc(d.city)}.</p></div>`;
@@ -1760,12 +1845,16 @@ async function confirmDeleteDest(id,city){ if(!confirm(`Excluir destino "${city}
 // Reservation
 const RES_TYPES=['Hotel','Voo','Aluguel de Carro','Transfer','Passeio / Tour','Restaurante','Trem','Outro'];
 const CURRENCIES=['BRL','USD','EUR','GBP','JPY','ARS','CLP','CHF','NOK','SEK'];
-function resFields(r={}){
+function resFields(r={},curDestId){
+  const t=findTrip(state.currentId);
   const to=RES_TYPES.map(t=>`<option value="${t}" ${r.type===t?'selected':''}>${t}</option>`).join('');
   const co=CURRENCIES.map(c=>`<option value="${c}" ${(r.currency||'BRL')===c?'selected':''}>${curSym(c)} ${c}</option>`).join('');
   const po=['Pendente','Pago','Pagar no local','Gratuito'].map(p=>`<option value="${p}" ${(r.paymentStatus||'Pendente')===p?'selected':''}>${p}</option>`).join('');
   const type=r.type||'Hotel';
-  return `<div class="field"><label>Tipo</label><select id="r-type" onchange="onResTypeChange()">${to}</select></div>
+  const dests=(t&&t.destinations)||[];
+  const dsel=dests.length?`<div class="field"><label>Cidade</label><select id="r-dest">
+    ${dests.map(d=>`<option value="${d.id}" ${d.id===curDestId?'selected':''}>${d.flagEmoji} ${esc(d.city)}</option>`).join('')}</select></div>`:'';
+  return `${dsel}<div class="field"><label>Tipo</label><select id="r-type" onchange="onResTypeChange()">${to}</select></div>
     ${field('r-title','Título','text',r.title||'')}${field('r-provider','Empresa / Hotel / Cia','text',r.providerName||'')}
     ${field('r-conf','Nº de confirmação','text',r.confirmationNumber||'')}
     <div id="r-datefields">${resDateFields(type,r)}</div>
@@ -1788,11 +1877,13 @@ function resFields(r={}){
     ${field('r-address','Endereço','text',r.address||'')}${field('r-notes','Notas','textarea',r.notes||'')}
     <div id="r-hotelfields">${resHotelFields(type,r)}</div>`;
 }
-function openAddRes(destId){ modal('Nova Reserva',resFields(),async ov=>{
-  await actAddReservation(destId,buildResInput(ov));
+function openAddRes(destId){ modal('Nova Reserva',resFields({},destId),async ov=>{
+  await actAddReservation(val(ov,'r-dest')||destId,buildResInput(ov));
   renderDetail(); toast('Reserva adicionada!'); }); }
-function openEditRes(destId,resId){ const {r}=findRes(resId);
-  modal('Editar Reserva',resFields(r||{}),async ov=>{ await actUpdateReservation(resId,buildResInput(ov));
+function openEditRes(destId,resId){ const {d,r}=findRes(resId); const curDest=d?d.id:destId;
+  modal('Editar Reserva',resFields(r||{},curDest),async ov=>{
+    await actUpdateReservation(resId,buildResInput(ov));
+    const chosen=val(ov,'r-dest'); if(chosen && chosen!==curDest) await actMoveReservation(resId,chosen);
     renderDetail(); toast('Reserva atualizada!'); }); }
 async function confirmDeleteRes(id,title){ if(!confirm(`Excluir reserva "${title}"?`)) return; await actDeleteReservation(id); renderDetail(); toast('Reserva excluída'); }
 

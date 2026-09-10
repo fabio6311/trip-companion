@@ -562,7 +562,13 @@ function flag(cc){ if(!cc) return '🏳️';
 function daysBetween(a,b){ if(!a||!b) return 0;
   return Math.max(0,Math.round((new Date(b+'T00:00:00')-new Date(a+'T00:00:00'))/86400000)); }
 function decorate(t){
-  const ds=(t.destinations||[]).filter(Boolean).slice().sort((a,b)=>(a.orderIndex||0)-(b.orderIndex||0));
+  const ds=(t.destinations||[]).filter(Boolean).slice();
+  // Ordena por DATA de chegada (cronológico, funciona virando o ano) quando todas têm data;
+  // senão, mantém a ordem manual (orderIndex) para não deslocar paradas "a definir".
+  const allDated = ds.length>0 && ds.every(d=>d.arrivalDate);
+  if(allDated) ds.sort((a,b)=> a.arrivalDate<b.arrivalDate?-1 : (a.arrivalDate>b.arrivalDate?1 : (a.orderIndex||0)-(b.orderIndex||0)));
+  else ds.sort((a,b)=>(a.orderIndex||0)-(b.orderIndex||0));
+  ds.forEach((d,i)=>d.orderIndex=i); // renumera para manter "inserir parada" coerente com a exibição
   t.destinations=ds;
   t.travelers=(t.travelers||[]).filter(Boolean);
   t.expenses=(t.expenses||[]).filter(Boolean);

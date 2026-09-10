@@ -1423,7 +1423,7 @@ function renderRequisitos(){
 
 // ── Custos ───────────────────────────────────────────────────────────────────
 const EXP_ICONS={'Transportes':'🚗','Acomodações':'🏨','Refeições':'🍽️','Passeios':'📸','Compras':'🛍️'};
-const EXP_HEX={'Transportes':'#007AFF','Acomodações':'#FFCC00','Refeições':'#8E8E93','Passeios':'#34C759','Compras':'#FF9500'};
+const EXP_HEX={'Transportes':'#0A4DA0','Acomodações':'#FFCC00','Refeições':'#8E8E93','Passeios':'#34C759','Compras':'#FF9500'};
 function guessExpenseCat(type){const l=(type||'').toLowerCase();
   if(l.includes('voo')||l.includes('carro')||l.includes('trem')||l.includes('transfer'))return 'Transportes';
   if(l.includes('hotel'))return 'Acomodações'; if(l.includes('restaurante'))return 'Refeições';
@@ -1546,6 +1546,23 @@ async function importReceipt(){
 function resBRL(r){ return (+r.amountBRL>0)?+r.amountBRL:(+r.priceTotal||0); } // valor em R$ (convertido) ou fallback
 let _spendScale='sqrt'; // 'sqrt' (comprimida) | 'linear' (proporcional)
 function toggleSpendScale(){ _spendScale=(_spendScale==='sqrt'?'linear':'sqrt'); renderTab(); }
+// Gráfico de barras horizontais empilhadas por categoria (usado em cidade/país)
+function spendGroupChart(title,groups){
+  groups=(groups||[]).filter(g=>g.total>0).sort((a,b)=>b.total-a.total);
+  if(!groups.length) return '';
+  const CATS=['Transportes','Acomodações','Refeições','Passeios','Compras'];
+  const max=Math.max(1,...groups.map(g=>g.total)); const comp=(_spendScale==='sqrt');
+  const wOf=v=>Math.max(4,Math.round((comp?Math.sqrt(v)/Math.sqrt(max):v/max)*100));
+  let h=`<div class="section"><div class="section-title" style="margin-bottom:12px">${title}</div><div class="card" style="padding:10px 16px">`;
+  groups.forEach(g=>{
+    const segs=CATS.filter(c=>g.cats[c]>0).map(c=>`<div title="${c}: ${fmt$(g.cats[c])}" style="width:${Math.round(g.cats[c]/g.total*100)}%;background:${EXP_HEX[c]}"></div>`).join('');
+    h+=`<div style="padding:7px 0">
+      <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:13px">
+        <span style="font-weight:500">${g.icon||''} ${esc(g.name)}</span><span style="font-weight:600">${fmt$(g.total)}</span></div>
+      <div style="height:12px;border-radius:6px;overflow:hidden;background:var(--border);width:${wOf(g.total)}%;min-width:26px;display:flex">${segs}</div></div>`;
+  });
+  return h+`</div></div>`;
+}
 function renderCustos(){
   const t=findTrip(state.currentId);
   const cats={'Transportes':0,'Acomodações':0,'Refeições':0,'Passeios':0,'Compras':0};
@@ -1595,6 +1612,16 @@ function renderCustos(){
         ${legend?`<div style="display:flex;flex-wrap:wrap;gap:6px 14px;justify-content:center;margin-top:12px;font-size:11px;color:var(--text2)">${legend}</div>`:''}
         <div style="font-size:11px;color:var(--text3);text-align:center;margin-top:8px">${comp?'Escala comprimida (√) — dias menores ficam visíveis apesar da passagem. ':''}Toque num dia para ver o total.</div>
       </div></div>`;
+    // Gastos por cidade e por país (mesmas categorias/cores)
+    const cityMap={}, ctryMap={};
+    const addTo=(map,key,icon,cat,v)=>{ if(!(v>0))return; map[key]=map[key]||{name:key,icon,cats:{},total:0}; map[key].cats[cat]=(map[key].cats[cat]||0)+v; map[key].total+=v; };
+    t.destinations.forEach(d=>d.reservations.forEach(r=>{ const cat=r.expenseCategory||guessExpenseCat(r.type); const v=resBRL(r);
+      addTo(cityMap,d.city,d.flagEmoji,cat,v); addTo(ctryMap,d.country||'—',d.flagEmoji,cat,v); }));
+    (t.expenses||[]).forEach(e=>{ const v=+e.amountBRL||0; const d=(t.destinations||[]).find(x=>e.city&&norm(x.city)===norm(e.city));
+      addTo(cityMap, d?d.city:(e.city||'Sem cidade'), d?d.flagEmoji:'📍', e.category||'Compras', v);
+      addTo(ctryMap, d?(d.country||'—'):'—', d?d.flagEmoji:'🏳️', e.category||'Compras', v); });
+    html+=spendGroupChart('Gastos por cidade', Object.values(cityMap));
+    if(Object.keys(ctryMap).length>1) html+=spendGroupChart('Gastos por país', Object.values(ctryMap));
   }
   t.destinations.forEach(d=>{ const dr=d.reservations.filter(r=>+r.priceTotal>0);
     if(dr.length){ html+=`<div class="section"><div class="section-title">${d.flagEmoji} ${esc(d.city)}</div><div class="card">`;

@@ -659,6 +659,46 @@ function attachResVoucher(destId,resId){ pickFile('application/pdf,image/*', asy
 }); }
 function loadOffline(){ try{ return JSON.parse(localStorage.getItem(STORE_KEY)||'[]'); }catch(e){ return []; } }
 
+// ── Verificador de anexos: acha vouchers/documentos cujo arquivo se perdeu ──
+function showReport(title,bodyHtml){
+  const ov=document.createElement('div'); ov.className='overlay';
+  ov.innerHTML=`<div class="modal"><h3>${title}</h3>${bodyHtml}
+    <div class="modal-footer"><button class="btn btn-primary" onclick="this.closest('.overlay').remove()">Fechar</button></div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+  document.body.appendChild(ov); return ov;
+}
+async function checkAttachments(){
+  const t=findTrip(state.currentId); const bv=[], bd=[]; if(!t) return {bv,bd};
+  for(const d of (t.destinations||[])) for(const r of (d.reservations||[])){
+    if(r.voucher){ let ok=false;
+      if(r.voucher.data) ok=true; else if(r.voucher.ref) ok=!!(await blobGet(r.voucher.ref));
+      if(!ok) bv.push({city:d.city,resId:r.id,title:r.title||'Reserva',type:r.type}); }
+  }
+  for(const tr of (t.travelers||[])) for(const dc of (tr.documents||[])){
+    if(dc.image){ let ok = String(dc.image).startsWith('data:') || !!(await blobGet(dc.image));
+      if(!ok) bd.push({traveler:tr.name,tid:tr.id,did:dc.id,type:dc.type}); }
+  }
+  return {bv,bd};
+}
+async function openAttachmentsReport(){
+  toast('Verificando anexos…',3000);
+  const {bv,bd}=await checkAttachments();
+  if(!bv.length && !bd.length){
+    showReport('Verificação de anexos',`<div style="padding:4px 0;color:var(--text2)">✅ Todos os vouchers e documentos com anexo estão íntegros — nada para reenviar.</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:10px">Obs.: reservas ou gastos que nunca chegaram a ser salvos (por falta de espaço) não deixam rastro. Se sentir falta de alguma reserva, é só adicioná-la de novo.</div>`);
+    return; }
+  let h=`<div style="font-size:13px;color:var(--text2);margin-bottom:10px">Estes anexos ficaram <b>sem o arquivo</b> (provavelmente pela falta de espaço). Toque em reenviar para anexar de novo:</div>`;
+  if(bv.length){ h+=`<div class="section-title" style="margin:6px 0">Vouchers (${bv.length})</div>`;
+    bv.forEach(x=>{ h+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border)">
+      <div style="min-width:0"><div style="font-weight:500;font-size:13px">${esc(x.title)}</div><div style="font-size:11px;color:var(--text3)">${esc(x.city)} · ${esc(x.type)}</div></div>
+      <button class="btn btn-soft btn-sm" style="flex-shrink:0" onclick="this.closest('.overlay').remove();attachResVoucher('','${x.resId}')">📎 Reenviar</button></div>`; }); }
+  if(bd.length){ h+=`<div class="section-title" style="margin:14px 0 6px">Documentos (${bd.length})</div>`;
+    bd.forEach(x=>{ h+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border)">
+      <div style="min-width:0"><div style="font-weight:500;font-size:13px">${esc(x.type)}</div><div style="font-size:11px;color:var(--text3)">${esc(x.traveler)}</div></div>
+      <button class="btn btn-soft btn-sm" style="flex-shrink:0" onclick="this.closest('.overlay').remove();attachDocImage('${x.tid}','${x.did}')">📷 Reanexar</button></div>`; }); }
+  showReport('Anexos faltando',h);
+}
+
 // ── Toast ────────────────────────────────────────────────────────────────────
 function toast(m,ms=2200){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),ms);}
 
@@ -1063,6 +1103,7 @@ function renderGeral(){
     ${countriesBlock}
     ${t.notes?`<div class="section" style="margin-top:26px"><div class="section-title" style="margin-bottom:8px">Observações da viagem</div>
       <div class="card" style="text-align:left"><div class="row"><div class="row-body">${esc(t.notes)}</div></div></div></div>`:''}
+    <div class="section" style="margin-top:28px"><button class="btn btn-soft btn-sm" onclick="openAttachmentsReport()">🔍 Verificar anexos</button></div>
   </div>`;
 }
 

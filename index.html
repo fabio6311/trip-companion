@@ -92,6 +92,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .diary-click:hover{background:var(--bg)}
 .diary-click:active{background:var(--border)}
 .diary-chev{align-self:center;color:var(--text3);font-size:20px;flex-shrink:0;line-height:1}
+#banners{position:fixed;top:0;left:0;right:0;z-index:300;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px;pointer-events:none}
+.banner{pointer-events:auto;cursor:pointer;max-width:560px;width:calc(100% - 20px);display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.2);font-size:14px;font-weight:500;color:#fff;line-height:1.35}
+.banner-ok{background:#1C8C3A}
+.banner-err{background:#C41A17}
+.banner-warn{background:#C05F00}
+.banner-ic{font-size:16px;flex-shrink:0}
+.banner-msg{flex:1;min-width:0}
+.banner-x{opacity:.85;font-size:12px;flex-shrink:0}
 
 /* ── Celular (iPhone/tablet estreito): 1 tela por vez, topbar compacto ── */
 @media (max-width:820px){
@@ -480,9 +488,9 @@ async function doAirImport(mode){
       });
 
       renderDetail(); renderTripList();
-      if(mode==='merge') toast(`Completado: +${newCities} cidade(s), +${newFlights} voo(s) (duplicados ignorados) ✈️`);
-      else { const np=(data.passengers||[]).length; toast(`Importado: ${stays.length} cidade(s) + ${segs.length} voo(s)${np?' + '+np+' passageiro(s)':''} ✈️`); }
-    }catch(e){ toast('Erro ao importar passagem: '+e.message,5000); }
+      if(mode==='merge') banner(`Passagem concluída: +${newCities} cidade(s), +${newFlights} voo(s) (duplicados ignorados) ✈️`,'ok');
+      else { const np=(data.passengers||[]).length; banner(`Passagem importada: ${stays.length} cidade(s) + ${segs.length} voo(s)${np?' + '+np+' passageiro(s)':''} ✈️`,'ok'); }
+    }catch(e){ banner('Falha ao importar a passagem: '+e.message,'err'); }
   });
 }
 // Descobre em qual cidade o viajante estará numa data (para alocar a reserva automaticamente)
@@ -539,9 +547,9 @@ async function importVoucher(destId){
       renderDetail();
       // Avisa se a data ficou fora do período da viagem (não apareceria no diário)
       if(t.startDate && t.endDate && (resDate<t.startDate || resDate>t.endDate))
-        toast('⚠️ Importado em '+(cityName||'?')+', mas a data ('+fmt(resDate)+') está FORA do período — ajuste a data/cidade na reserva.',7000);
-      else toast('Voucher → '+(cityName||'')+' · '+fmt(resDate)+' 🗂️',4000);
-    }catch(e){ toast('Erro ao importar voucher: '+e.message,5000); }
+        banner('Voucher importado em '+(cityName||'?')+', mas a data ('+fmt(resDate)+') está FORA do período — ajuste a data/cidade na reserva.','warn');
+      else banner('Voucher importado → '+(cityName||'')+' · '+fmt(resDate)+' 🗂️','ok');
+    }catch(e){ banner('Falha ao importar o voucher: '+e.message,'err'); }
   });
 }
 
@@ -701,6 +709,18 @@ async function openAttachmentsReport(){
 
 // ── Toast ────────────────────────────────────────────────────────────────────
 function toast(m,ms=2200){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),ms);}
+// Banner de confirmação do upload (fica até clicar; sucesso some sozinho após 12s)
+function banner(msg,type){
+  let host=document.getElementById('banners');
+  if(!host){ host=document.createElement('div'); host.id='banners'; document.body.appendChild(host); }
+  const el=document.createElement('div'); el.className='banner banner-'+(type||'ok');
+  el.innerHTML=`<span class="banner-ic">${type==='err'?'⚠️':type==='warn'?'⚠️':'✓'}</span><span class="banner-msg"></span><span class="banner-x">✕</span>`;
+  el.querySelector('.banner-msg').textContent=msg;
+  el.onclick=()=>el.remove();
+  host.appendChild(el);
+  if((type||'ok')==='ok') setTimeout(()=>{ if(el.parentNode) el.remove(); },12000);
+  return el;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Start / mode selection
@@ -1586,8 +1606,11 @@ async function importReceipt(){
       let city=d.city||''; if(!city){ const cd=cityForDay(findTrip(state.currentId),date); if(cd) city=cd.city; } // infere pela data
       const r=await rateToBRL(cur,date); const brl=r?amt*r:0;
       actAddExpense({category:cat,establishment:d.establishment||'',city:city,date:date,amountLocal:amt,currency:cur,amountBRL:brl,rate:r,notes:d.notes||''});
-      renderDetail(); toast(brl?'Recibo importado e convertido! 🧾':'Recibo importado — informe o valor em R$ 🧾');
-    }catch(e){ toast('Erro ao ler recibo: '+e.message,5000); }
+      renderDetail();
+      const nome=d.establishment||cat; const valorStr=fmtCur(amt,cur)+(brl&&cur!=='BRL'?' → '+fmt$(brl):'');
+      if(amt>0) banner(`Nota importada: ${nome} · ${valorStr}${city?' · '+city:''} 🧾`,'ok');
+      else banner(`Nota importada: ${nome}${city?' · '+city:''} — informe o valor manualmente 🧾`,'warn');
+    }catch(e){ banner('Falha ao ler o recibo: '+e.message,'err'); }
   });
 }
 function resBRL(r){ return (+r.amountBRL>0)?+r.amountBRL:(+r.priceTotal||0); } // valor em R$ (convertido) ou fallback
@@ -1772,8 +1795,8 @@ async function importDoc(tid){
       const notes=[d.holderName?('Titular: '+d.holderName):'', d.birthDate?('Nasc.: '+fmt(d.birthDate)):'', d.issueDate?('Emissão: '+fmt(d.issueDate)):'', d.notes||''].filter(Boolean).join(' · ');
       const image=await downscaleImage(file); // guarda a própria imagem do documento (PDF fica só com os dados)
       actAddDoc(tid,{type,number:d.number||'',issuingCountry:d.issuingCountry||'',expiryDate:d.expiryDate||'',notes,image:image||''});
-      renderDetail(); toast('Documento lido pela IA! 📄');
-    }catch(e){ toast('Erro ao ler documento: '+e.message,5000); }
+      renderDetail(); banner(`Documento lido: ${type}${d.number?' · '+d.number:''} 📄`,'ok');
+    }catch(e){ banner('Falha ao ler o documento: '+e.message,'err'); }
   });
 }
 function docExpiry(doc,returnDate){

@@ -320,6 +320,16 @@ async function callClaude(prompt, base64, mediaType){
   if(!r.ok) throw new Error((j.error&&j.error.message)||('HTTP '+r.status));
   return j.content[0].text;
 }
+// Chamada só-texto (gasto por voz) — bem mais barata, sem imagem
+async function callClaudeText(prompt){
+  const key=getClaudeKey(); if(!key) throw new Error('Chave da Claude não configurada');
+  const r=await fetch('https://api.anthropic.com/v1/messages',{ method:'POST',
+    headers:{'x-api-key':key,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:CLAUDE_MODEL,max_tokens:400,messages:[{role:'user',content:prompt}]}) });
+  const j=await r.json();
+  if(!r.ok) throw new Error((j.error&&j.error.message)||('HTTP '+r.status));
+  return j.content[0].text;
+}
 function openKeyModal(then){
   const key=getClaudeKey();
   const ov=modal('Chave da Claude API (IA)', `
@@ -1526,9 +1536,10 @@ function renderGastos(){
   const total=list.reduce((s,e)=>s+(+e.amountBRL||0),0);
   let html=`<div class="tab-content"><div class="section-header" style="margin-bottom:16px">
     <span class="section-title">${list.length} gasto(s) · ${fmt$(total)}</span>
-    <div style="display:flex;gap:6px">
+    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+      <button class="btn btn-primary btn-sm" onclick="openVoiceExpense()">🎤 Falar gasto</button>
       <button class="btn btn-soft btn-sm" onclick="importReceipt()">📎 Recibo (IA)</button>
-      <button class="btn btn-primary btn-sm" onclick="openAddExpense()">+ Gasto</button></div></div>`;
+      <button class="btn btn-soft btn-sm" onclick="openAddExpense()">+ Gasto</button></div></div>`;
   if(list.length){ // total por cidade
     const byCity={}; list.forEach(e=>{ const c=e.city||'— sem cidade'; byCity[c]=(byCity[c]||0)+(+e.amountBRL||0); });
     html+=`<div class="section"><div class="section-title" style="margin-bottom:8px">Total por cidade</div><div class="card">`;
@@ -1549,7 +1560,9 @@ function renderGastos(){
 }
 function expenseFields(e={}){
   const co=EXP_CATS.map(c=>`<option value="${c}" ${(e.category||'Compras')===c?'selected':''}>${EXP_ICONS[c]} ${c}</option>`).join('');
-  const cu=CURRENCIES.map(c=>`<option value="${c}" ${(e.currency||'BRL')===c?'selected':''}>${curSym(c)} ${c}</option>`).join('');
+  const ecur=(e.currency||'BRL').toUpperCase();
+  const curList=CURRENCIES.includes(ecur)?CURRENCIES:[ecur].concat(CURRENCIES);
+  const cu=curList.map(c=>`<option value="${c}" ${ecur===c?'selected':''}>${curSym(c)} ${c}</option>`).join('');
   return `<div class="field"><label>Tipo de gasto</label><select id="e-cat">${co}</select></div>
     ${field('e-est','Estabelecimento','text',e.establishment||'')}
     <div class="field-row">${field('e-city','Cidade','text',e.city||'')}${field('e-date','Data','date',e.date||new Date().toISOString().slice(0,10))}</div>
@@ -1587,6 +1600,47 @@ async function autoConvertRes(){
 function buildExpenseInput(ov){ return {category:val(ov,'e-cat'),establishment:val(ov,'e-est'),city:val(ov,'e-city'),date:val(ov,'e-date'),
   amountLocal:parseFloat(val(ov,'e-amt'))||0,currency:val(ov,'e-cur'),amountBRL:parseFloat(val(ov,'e-brl'))||0,rating:parseInt(val(ov,'e-rating'))||0,notes:val(ov,'e-notes')}; }
 function openAddExpense(){ modal('Novo Gasto',expenseFields(),async o=>{ actAddExpense(buildExpenseInput(o)); renderDetail(); toast('Gasto adicionado!'); }); setTimeout(autoConvert,60); }
+function openAddExpensePrefilled(e){
+  modal('Confirmar gasto',expenseFields(e),async o=>{ actAddExpense(buildExpenseInput(o)); renderDetail(); banner('Gasto adicionado: '+(e.establishment||e.category||'gasto')+' 🧾','ok'); });
+  setTimeout(autoConvert,60);
+}
+// 🎤 Falar gasto — ditar e a IA extrai; data=hoje, cidade/moeda atuais são assumidas
+function openVoiceExpense(){
+  if(!getClaudeKey()){ openKeyModal(openVoiceExpense); return; }
+  const t=findTrip(state.currentId); if(!t){ toast('Abra uma viagem primeiro.'); return; }
+  const cityNow=destForDate(t,new Date().toISOString().slice(0,10));
+  const hint=cityNow?('Assumo: hoje · '+esc(cityNow.city)+' · '+(countryToCurrency(cityNow.countryCode)||'moeda local')):'Assumo a data de hoje.';
+  const ov=modal('🎤 Falar gasto',
+    `<div class="field"><label>Fale ou digite o gasto</label>
+      <textarea id="ve-text" rows="3" placeholder="Ex.: jantar no Pato Laqueado, 180 iuan · táxi 45 reais · ingresso museu 60"></textarea>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px">📱 Toque no 🎤 do teclado e fale. Diga ao menos o <b>valor</b>. ${hint} — dá para ajustar na confirmação.</div></div>`,
+    async o=>{ const text=(val(o,'ve-text')||'').trim(); if(!text) throw new Error('Fale ou digite o gasto.');
+      await processVoiceExpense(text); });
+  const btn=ov.querySelector('#modal-save'); if(btn) btn.textContent='Processar';
+  setTimeout(()=>{ const ta=ov.querySelector('#ve-text'); if(ta) ta.focus(); },80);
+}
+async function processVoiceExpense(text){
+  toast('Processando sua fala…',5000);
+  const today=new Date().toISOString().slice(0,10);
+  const prompt=`Hoje é ${today}. Você recebe a FALA de um viajante lançando um gasto. Extraia e retorne SOMENTE um JSON válido:
+{"establishment":"","amount":0,"currency":"","category":"Transportes|Acomodações|Refeições|Passeios|Compras","date":"YYYY-MM-DD","city":""}
+Regras:
+- amount = valor numérico dito (ex.: "cento e oitenta" = 180).
+- currency = código ISO (CNY, AED, USD, EUR, BRL, JPY, GBP...) SOMENTE se a moeda for dita (reais, iuan, dirham, dólar, euro, iene...); senão null.
+- category pelo contexto: almoço/jantar/café/restaurante/comida=Refeições; táxi/uber/metrô/ônibus/trem/transfer/gasolina=Transportes; hotel/hospedagem=Acomodações; ingresso/passeio/tour/museu/atração=Passeios; loja/compra/souvenir/mercado/farmácia=Compras. Na dúvida, "Compras".
+- date: resolva datas relativas ("ontem", "dia 5") a partir de hoje; se não for dita, null.
+- city e establishment: só se ditos; senão null.
+Responda só o JSON. Fala: """${text}"""`;
+  const d=parseAIJSON(await callClaudeText(prompt));
+  const tt=findTrip(state.currentId);
+  const date=snapDateToTrip(d.date,tt)||d.date||today;
+  const cityNow=destForDate(tt,date);
+  const city=d.city||(cityNow?cityNow.city:'');
+  const currency=(d.currency||'').toUpperCase()||(cityNow?countryToCurrency(cityNow.countryCode):'')||'BRL';
+  const category=EXP_CATS.includes(d.category)?d.category:'Compras';
+  const amount=+d.amount||0;
+  openAddExpensePrefilled({category,establishment:d.establishment||'',city,date,amountLocal:amount,currency});
+}
 function openEditExpense(id){ const e=expensesOf().find(x=>x.id===id)||{}; modal('Editar Gasto',expenseFields(e),async o=>{ actUpdateExpense(id,buildExpenseInput(o)); renderDetail(); toast('Gasto atualizado!'); }); }
 function confirmDeleteExpense(id){ if(!confirm('Excluir este gasto?')) return; actDeleteExpense(id); renderDetail(); toast('Gasto excluído'); }
 const RECEIPT_PROMPT=`Analise este recibo/nota fiscal/comprovante de compra e retorne SOMENTE um JSON válido:
@@ -1963,7 +2017,9 @@ async function confirmDeleteDest(id,city){ if(!confirm(`Excluir destino "${city}
 
 // Reservation
 const RES_TYPES=['Hotel','Voo','Aluguel de Carro','Transfer','Passeio / Tour','Restaurante','Trem','Outro'];
-const CURRENCIES=['BRL','USD','EUR','GBP','JPY','ARS','CLP','CHF','NOK','SEK'];
+const CURRENCIES=['BRL','USD','EUR','GBP','JPY','CNY','AED','ARS','CLP','UYU','PEN','COP','MXN','CAD','AUD','NZD','CHF','NOK','SEK','DKK','THB','INR','ZAR','SGD','HKD','KRW','TRY','EGP'];
+const COUNTRY_CUR={BR:'BRL',PT:'EUR',ES:'EUR',FR:'EUR',IT:'EUR',DE:'EUR',NL:'EUR',IE:'EUR',GR:'EUR',AT:'EUR',BE:'EUR',FI:'EUR',US:'USD',GB:'GBP',JP:'JPY',CN:'CNY',AE:'AED',AR:'ARS',CL:'CLP',UY:'UYU',PE:'PEN',CO:'COP',MX:'MXN',CA:'CAD',AU:'AUD',NZ:'NZD',CH:'CHF',NO:'NOK',SE:'SEK',DK:'DKK',TH:'THB',IN:'INR',ZA:'ZAR',SG:'SGD',HK:'HKD',KR:'KRW',TR:'TRY',EG:'EGP',MA:'MAD',IL:'ILS',ID:'IDR',MY:'MYR',PH:'PHP',VN:'VND'};
+function countryToCurrency(cc){ return COUNTRY_CUR[(cc||'').toUpperCase()]||''; }
 function resFields(r={},curDestId){
   const t=findTrip(state.currentId);
   const to=RES_TYPES.map(t=>`<option value="${t}" ${r.type===t?'selected':''}>${t}</option>`).join('');
